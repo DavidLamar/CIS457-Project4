@@ -16,11 +16,15 @@
 #define MESSAGE_SIZE 256
 #define OP_INIT 0x00
 #define OP_BROADCAST 0x01
+#define OP_WHISPER 0x02
+#define OP_CLIENT_LIST 0x03
+#define OP_KICK_USER 0x04
 
 struct User {
 	int valid;
 	char name[256];
 	int sockfd;
+	pthread_t pid;
 };
 
 struct User users[100];
@@ -28,6 +32,12 @@ pthread_mutex_t lock;
 
 void * server(void * clientSocket);
 void getUsername(char * username, int sockfd);
+void whisper(char username[256], char message[256]);
+void removeUser(char name[256]);
+void kickUser(char username[256]);
+struct User getUser(char username[256]);
+struct User getUserBySockfd(int sockfd);
+void clientList(int sockfd);
 
 int main(int argc, char **argv) {
 	if (pthread_mutex_init(&lock, NULL) != 0) {
@@ -105,6 +115,17 @@ void * server(void * cs) {
 				printf("Sending a broadcast message from user %s.\n", username);
 				broadcast(username, line + 1);
 				break;
+			case OP_WHISPER:
+				whisper(line + 1, line + 257);
+				break;
+			case OP_CLIENT_LIST:
+				printf("Got client list command.\n");
+				clientList(clientSocket);
+				break;
+			case OP_KICK_USER:
+				printf("Got a kick command.\n");
+				kickUser(line + 1);
+				break;
 		}
 	}
 
@@ -117,16 +138,21 @@ int addUser(char name[256], int sockfd) {
 	int i;
 
 	for (i = 0; i < 100; i++) {
-		if (users[i].valid == 1 && strcmp(name, users[i].name) == 0) {
-			printf("This username is already taken.\n");
-			pthread_mutex_unlock(&lock);
-			return 0;
+		if (users[i].valid == 1) {
+			if (strcmp(name, users[i].name) == 0) {
+				printf("Username is taken.\n");
+				pthread_mutex_unlock(&lock);
+				return 0;
+			}
+			continue;
 		} else {
+			printf("Setting user %d to %s.\n", i, name);
 			//TODO: Broadcast this.
 			printf("User %s has joined the chat.\n", name);
 			users[i].valid = 1;
 			memcpy(users[i].name, name, 256);
 			users[i].sockfd = sockfd;
+			users[i].pid = pthread_self();
 			pthread_mutex_unlock(&lock);
 			return 1;
 		}
@@ -137,20 +163,84 @@ int addUser(char name[256], int sockfd) {
 	return 0;
 }
 
-int broadcast(char sender[256], char message[MESSAGE_SIZE]) {
-	int i;
-	char outgoing[514];
-	strcpy(outgoing, sender);
-	outgoing[257] = ':';
-	outgoing[258] = ' ';
-	strcpy(outgoing + 258, message);
+void removeUser(char name[256]) {
+	pthread_mutex_lock(&lock);
 
+	int i;
 	for (i = 0; i < 100; i++) {
-		if (strcmp(sender, users[i].name) != 0 && users[i].valid == 1) {
-			printf("Sending broadcast message to %s on sfd %d.\n", users[i].name, users[i].sockfd);
-			send(users[i].sockfd, outgoing, 514, 0);
+		if (strcmp(name, users[i].name) == 0) {
+			users[i].valid = 0;
+			break;
 		}
 	}
+
+	pthread_mutex_unlock(&lock);
+}
+
+int broadcast(char sender[256], char message[MESSAGE_SIZE]) {
+	int i;
+	char outgoing[513];
+	outgoing[0] = OP_BROADCAST;
+	strcpy(outgoing + 1, sender);
+	strcpy(outgoing + 1 + 256, message);
+
+	for (i = 0; i < 100; i++) {
+		//printf("For user %s:\n\tValid bit is %d\n\tSockfd is %d\n\n", users[i].name, users[i].valid, users[i].sockfd);
+		if (strcmp(sender, users[i].name) != 0 && users[i].valid == 1) {
+			printf("Sending broadcast message to %s on sfd %d.\n", users[i].name, users[i].sockfd);
+			send(users[i].sockfd, outgoing, 513, 0);
+		}
+	}
+}
+
+
+void whisper(char username[256], char message[256]) {
+	int sockfd = getSockfd(username);
+	
+	if (sockfd == -1) {
+		printf("No such user.\n");
+		//TODO: Send error to user.
+		return;
+	}
+
+	send(sockfd, message, 256, 0);
+}
+
+void kickUser(char username[256]) {
+	username[strlen(username) - 1] = 0;
+	struct User user = getUser(username);
+	
+	if (user.valid == 0) {
+		printf("No such user.\n");
+		//TODO: Send error to user.
+		return;
+	}
+
+	removeUser(username);
+	close(user.sockfd);
+	pthread_cancel(user.pid);
+	printf("%s was kicked from the chat.\n", username);
+}
+
+void clientList(int sockfd) {
+	char message[1500];
+	int i;	
+	for (i = 0; i < 1500; i++) {
+		message[i] = 0;
+	}
+	struct User user = getUserBySockfd(sockfd);
+
+	message[0] = OP_CLIENT_LIST;
+
+	int userNum = 0;
+	for (i = 0; i < 100; i++) {
+		if (users[i].valid && strcmp(user.name, users[i].name) != 0) {
+			strcpy(message + (userNum * 256) + 1, users[i].name);
+			userNum++;
+		}
+	}
+
+	send(user.sockfd, message, 1500, 0);
 }
 
 void getUsername(char * username, int sockfd) {
@@ -163,6 +253,44 @@ void getUsername(char * username, int sockfd) {
 		}
 	}
 }
+
+int getSockfd(char username[256]) {
+	int i;
+	for (i = 0; i < 100; i++) {
+		printf("Comparing %s to %s\n", username, users[i].name);
+		if (users[i].valid && strcmp(username, users[i].name) == 0) {
+			return users[i].sockfd;
+		}
+	}
+
+	return -1;
+}
+
+struct User getUser(char username[256]) {
+	struct User NULL_USER = {.valid = 0};
+	int i;
+	for (i = 0; i < 100; i++) {
+		if (users[i].valid && strcmp(username, users[i].name) == 0) {
+			return users[i];
+		}
+	}
+
+	return NULL_USER;
+}
+
+struct User getUserBySockfd(int sockfd) {
+	struct User NULL_USER = {.valid = 0};
+	int i;
+	for (i = 0; i < 100; i++) {
+		if (users[i].valid && users[i].sockfd == sockfd) {
+			return users[i];
+		}
+	}
+
+	return NULL_USER;
+}
+
+
 
 
 

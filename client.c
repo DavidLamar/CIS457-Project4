@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 
@@ -15,8 +16,12 @@
 #define MESSAGE_SIZE 256
 #define OP_INIT 0x00
 #define OP_BROADCAST 0x01
+#define OP_WHISPER 0x02
+#define OP_CLIENT_LIST 0x03
+#define OP_KICK_USER 0x04
 
 void * receive(void * cs);
+void processCommand(int sockfd, char * message);
 
 int main(int argc, char **argv) {
 	if (argc != 4) {
@@ -61,15 +66,10 @@ int main(int argc, char **argv) {
 	}
 
 	while (1) {
-		printf("Enter a message: ");
 		char line[MESSAGE_SIZE];	
 		fgets(line, MESSAGE_SIZE, stdin);
 
-		char message[MESSAGE_SIZE + 1];
-		message[0] = OP_BROADCAST;
-		strcpy(message + 1, line);
-
-		send(sockfd, message, strlen(message) + 1, 0);
+		processCommand(sockfd, line);
 	}
 
 	close(sockfd);
@@ -78,13 +78,114 @@ int main(int argc, char **argv) {
 }
 
 void * receive(void * cs) {
-	printf("Started receive thread.\n");
 	int clientSocket = *((int*)cs);
 	char line[BUFFER_SIZE];
+	int i;
 	while (1) {
-		recv(clientSocket, line, BUFFER_SIZE, 0);
-		printf("Got message from server: %s", line);
+		if (recv(clientSocket, line, BUFFER_SIZE, 0) == 0) {
+			printf("You were kicked from the chat.\n");
+			exit(0);
+		}
+
+		switch (line[0]) {
+			case OP_BROADCAST:
+				printf("%s (to everyone): %s", line + 1, line + 257);
+				break;
+			case OP_CLIENT_LIST:
+				printf("Clients in this chat:\n");
+				for (i = 0; i <= 5; i++) {
+					if (strlen(line + 1 + (i * 256)) == 0) {
+						break;
+					}
+					printf("\t%s\n", line + 1 + (i * 256));
+				}
+				break;
+		}
+		
+		//printf("Got message from server: %s", line);
 	}
+}
+
+void processCommand(int sockfd, char * message) {
+	char * token;
+	int i = 0;
+	int sizeOfCommand;
+	int sizeOfUsername;
+	char * command;
+	char * user;
+	char * content;
+	char outgoing[513];
+
+	if (message[0] != '/') {
+		outgoing[0] = OP_BROADCAST;
+		strcpy(outgoing + 1, message);
+		send(sockfd, outgoing, strlen(outgoing) + 1, 0);
+		return;
+	}
+	
+	while ((token = strsep(&message, " ")) != NULL) {
+		if (i == 0) {
+			printf("Set command to %s\n", token);
+			command = malloc(strlen(token) + 1);
+			strcpy(command, token);
+			sizeOfCommand = strlen(token) + 1;
+			i++;
+			continue;
+		}
+
+		if (i == 1) {
+			printf("Set user to %s\n", token);
+			user = malloc(strlen(token) + 1);
+			strcpy(user, token);
+			sizeOfUsername = strlen(token) + 1;
+			i++;
+			continue;
+		}
+		
+		if (i == 2) {
+			content = malloc(256 - (sizeOfCommand + sizeOfUsername));
+			strcpy(content, message + sizeOfCommand + sizeOfUsername);
+			printf("Set content to %s\n", content);
+			i++;
+			continue;
+		}
+
+		i++;
+	}
+
+	if (strcmp(command, "/end") == 0) {
+		//TODO
+		return;
+	}
+
+	if (strcmp(command, "/whisper") == 0) {
+		printf("Got a whisper command.\n");
+		outgoing[0] = OP_WHISPER;
+		strcpy(outgoing + 1, user);
+		strcpy(outgoing + 1 + 256, content);
+		send(sockfd, outgoing, strlen(outgoing) + 1, 0);
+		return;
+	}
+
+	if (strcmp(command, "/kick") == 0) {
+		outgoing[0] = OP_KICK_USER;
+		strcpy(outgoing + 1, user);
+		send(sockfd, outgoing, strlen(outgoing) + 1, 0);
+		return;
+	}
+
+	if (strcmp(command, "/help") == 0) {
+
+		return;
+	}
+
+	if (strcmp(command, "/list\n") == 0) {
+		outgoing[0] = OP_CLIENT_LIST;
+		send(sockfd, outgoing, strlen(outgoing) + 1, 0);
+		return;
+	}
+
+	printf("Command not found. Type /help for help.\n");
 }
 
 
