@@ -32,7 +32,7 @@ pthread_mutex_t lock;
 
 void * server(void * clientSocket);
 void getUsername(char * username, int sockfd);
-void whisper(char username[256], char message[256]);
+void whisper(char username[256], char * message, int fromSocket);
 void removeUser(char name[256]);
 void kickUser(char username[256]);
 struct User getUser(char username[256]);
@@ -116,7 +116,8 @@ void * server(void * cs) {
 				broadcast(username, line + 1);
 				break;
 			case OP_WHISPER:
-				whisper(line + 1, line + 257);
+				printf("Got a whisper command.\n");
+				whisper(line + 1, line + 257, clientSocket);
 				break;
 			case OP_CLIENT_LIST:
 				printf("Got client list command.\n");
@@ -194,16 +195,28 @@ int broadcast(char sender[256], char message[MESSAGE_SIZE]) {
 }
 
 
-void whisper(char username[256], char message[256]) {
-	int sockfd = getSockfd(username);
+void whisper(char username[256], char * message, int fromSocket) {
+	printf("Sending a whisper from %d to %s with message %s.\n", fromSocket, username, message);
+	struct User user = getUser(username);
+	char outgoing[513];
+
+	struct User sender = getUserBySockfd(fromSocket);
 	
-	if (sockfd == -1) {
+	if (user.valid != 1 || sender.valid != 1) {
 		printf("No such user.\n");
 		//TODO: Send error to user.
 		return;
 	}
 
-	send(sockfd, message, 256, 0);
+	printf("Sending a whisper from %s to %s.\n", sender.name, username);
+
+	outgoing[0] = OP_WHISPER;
+	strcpy(outgoing + 1, sender.name);
+	strcpy(outgoing + 257, message);
+
+	printf("Outgoing whisper is %x %s %s.\n", outgoing[0], outgoing + 1, outgoing + 257);
+
+	send(user.sockfd, outgoing, 513, 0);
 }
 
 void kickUser(char username[256]) {
@@ -252,18 +265,6 @@ void getUsername(char * username, int sockfd) {
 			break;
 		}
 	}
-}
-
-int getSockfd(char username[256]) {
-	int i;
-	for (i = 0; i < 100; i++) {
-		printf("Comparing %s to %s\n", username, users[i].name);
-		if (users[i].valid && strcmp(username, users[i].name) == 0) {
-			return users[i].sockfd;
-		}
-	}
-
-	return -1;
 }
 
 struct User getUser(char username[256]) {

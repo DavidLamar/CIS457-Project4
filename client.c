@@ -53,6 +53,8 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
+	bind(sockfd, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
+
 	//Send init message
 	char userAuth[257];
 	userAuth[0] = OP_INIT;
@@ -100,9 +102,10 @@ void * receive(void * cs) {
 					printf("\t%s\n", line + 1 + (i * 256));
 				}
 				break;
+			case OP_WHISPER:
+				printf("%s (to you): %s", line + 1, line + 257);
+				break;
 		}
-		
-		//printf("Got message from server: %s", line);
 	}
 }
 
@@ -111,19 +114,23 @@ void processCommand(int sockfd, char * message) {
 	int i = 0;
 	int sizeOfCommand;
 	int sizeOfUsername;
+	char * messageCopy;
 	char * command;
 	char * user;
 	char * content;
 	char outgoing[513];
 
+	messageCopy = malloc(strlen(message) + 1);
+	strcpy(messageCopy, message);
+
 	if (message[0] != '/') {
 		outgoing[0] = OP_BROADCAST;
 		strcpy(outgoing + 1, message);
-		send(sockfd, outgoing, strlen(outgoing) + 1, 0);
+		send(sockfd, outgoing, 513, 0);
 		return;
 	}
 	
-	while ((token = strsep(&message, " ")) != NULL) {
+	while ((token = strsep(&messageCopy, " ")) != NULL) {
 		if (i == 0) {
 			printf("Set command to %s\n", token);
 			command = malloc(strlen(token) + 1);
@@ -159,18 +166,19 @@ void processCommand(int sockfd, char * message) {
 	}
 
 	if (strcmp(command, "/whisper") == 0) {
-		printf("Got a whisper command.\n");
 		outgoing[0] = OP_WHISPER;
 		strcpy(outgoing + 1, user);
-		strcpy(outgoing + 1 + 256, content);
-		send(sockfd, outgoing, strlen(outgoing) + 1, 0);
+		strcpy(outgoing + 257, content);
+
+		printf("Sending outgoing message %x %s %s.\n", outgoing[0], outgoing + 1, outgoing + 257);
+		send(sockfd, outgoing, 513, 0);
 		return;
 	}
 
 	if (strcmp(command, "/kick") == 0) {
 		outgoing[0] = OP_KICK_USER;
 		strcpy(outgoing + 1, user);
-		send(sockfd, outgoing, strlen(outgoing) + 1, 0);
+		send(sockfd, outgoing, 513, 0);
 		return;
 	}
 
@@ -181,7 +189,7 @@ void processCommand(int sockfd, char * message) {
 
 	if (strcmp(command, "/list\n") == 0) {
 		outgoing[0] = OP_CLIENT_LIST;
-		send(sockfd, outgoing, strlen(outgoing) + 1, 0);
+		send(sockfd, outgoing, 513, 0);
 		return;
 	}
 
