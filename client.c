@@ -123,10 +123,11 @@ int main(int argc, char **argv) {
 
 void * receive(void * cs) {
 	int clientSocket = *((int*)cs);
+	char encryptedText[BUFFER_SIZE];
 	char line[BUFFER_SIZE];
 	int i;
 	while (1) {
-		if (recv(clientSocket, line, BUFFER_SIZE, 0) == 0) {
+		if (recv(clientSocket, encryptedText, BUFFER_SIZE, 0) == 0) {
 			printf("You were kicked from the chat.\n");
 			exit(0);
 		}
@@ -137,12 +138,19 @@ void * receive(void * cs) {
 		unsigned char message[513 + 256 + 4];
 		BIO * bio;
 
-		switch (line[0]) {
+		if (encryptedText[0] != OP_INIT && encryptedText[0] != OP_SYM) {
+			int encryptedMessageLen = encryptedText[1] << 24 | encryptedText[2] << 16 | encryptedText[3] << 8 | encryptedText[4];
+			decrypt(encryptedText + 5, encryptedMessageLen, key, iv, line + 1);
+			line[encryptedMessageLen] = '\0'; 
+		}
+
+
+		switch (encryptedText[0]) {
 			case OP_INIT:
-				bio = BIO_new_mem_buf(line + 1 + 16, strlen(line + 1 + 16) + 1);
+				bio = BIO_new_mem_buf(encryptedText + 1 + 16, strlen(encryptedText + 1 + 16) + 1);
 				serverPublicKey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
 
-				memcpy(serverIv, line + 1, 16);
+				memcpy(serverIv, encryptedText + 1, 16);
 
 				RAND_bytes(key, 32);
   				RAND_pseudo_bytes(iv, 16);
@@ -157,37 +165,16 @@ void * receive(void * cs) {
 				message[3] = (encryptedKeyLen >> 8) & 0xFF;
 				message[4] = encryptedKeyLen & 0xFF;
 
-				printf("Encrypted key length is %d.\n", encryptedKeyLen);
 				memcpy(message + 5, iv, 16);
 				memcpy(message + 5 + 16, encryptedKey, encryptedKeyLen);
 
-				printf("encrypted symMessage: \n");
-				for (i = 0; i < encryptedKeyLen; i++) {
-					printf("%x", encryptedKey[i]);
-				}
-				printf("\n");
-
 				printf("Username is: %s.\n", userName);
 
-				int nameLen = encrypt(userName, strlen(userName), key, iv, message + 518);
+				int nameLen = encrypt(userName, strlen(userName) + 1, key, iv, message + 518);
 				message[514] = (nameLen >> 24) & 0xFF;
 				message[515] = (nameLen >> 16) & 0xFF;
 				message[516] = (nameLen >> 8) & 0xFF;
 				message[517] = nameLen & 0xFF;
-
-				printf("Name length is %d.\n", nameLen);
-				printf("Name is: ");
-				for (i = 0; i < nameLen; i++) {
-					printf("%x", message[i + 518]);
-				}
-				printf("\n");
-
-				char test[256];
-				int testLen = decrypt(message + 518, nameLen, key, iv, test);
-				test[testLen] = '\0';
-				printf("Test is %s.\n", test);
-
-				printf("Sending op %x.\n", message[0]);
 
 				send(clientSocket, message, 513 + 256 + 4, 0);
 				break;
@@ -215,11 +202,12 @@ void processCommand(int sockfd, char * message) {
 	int i = 0;
 	int sizeOfCommand;
 	int sizeOfUsername;
+	int sizeOfContent;
 	char * messageCopy;
 	char * command;
 	char * user;
 	char * content;
-	char outgoing[517];
+	char outgoing[1029];
 	char messageContent[512];
 	int validCommand = 0;
 
@@ -230,6 +218,7 @@ void processCommand(int sockfd, char * message) {
 		validCommand = 1;
 		outgoing[0] = OP_BROADCAST;
 		strcpy(messageContent, message);
+		messageContent[strlen(message) + 1] = '\0';
 	} else {
 		//Have a command
 		while ((token = strsep(&messageCopy, " ")) != NULL) {
@@ -247,6 +236,7 @@ void processCommand(int sockfd, char * message) {
 				user = malloc(strlen(token) + 1);
 				strcpy(user, token);
 				sizeOfUsername = strlen(token) + 1;
+				user[sizeOfUsername] = '\0';
 				i++;
 				continue;
 			}
@@ -254,6 +244,8 @@ void processCommand(int sockfd, char * message) {
 			if (i == 2) {
 				content = malloc(256 - (sizeOfCommand + sizeOfUsername));
 				strcpy(content, message + sizeOfCommand + sizeOfUsername);
+				sizeOfContent = 256 - (sizeOfCommand + sizeOfUsername);
+				content[sizeOfContent] = '\0';
 				printf("Set content to %s\n", content);
 				i++;
 				continue;
@@ -270,7 +262,9 @@ void processCommand(int sockfd, char * message) {
 			validCommand = 1;
 			outgoing[0] = OP_WHISPER;
 			strcpy(messageContent, user);
+			messageContent[sizeOfUsername] = '\0';
 			strcpy(messageContent + 256, content);
+			messageContent[256 + sizeOfContent] = '\0';
 		}
 
 		if (strcmp(command, "/kick") == 0) {
@@ -292,19 +286,20 @@ void processCommand(int sockfd, char * message) {
 	
 
 	if (validCommand) {
-		unsigned char cipherText[512];
+		unsigned char cipherText[1024];
 		int cipherTextLen;
 		
-		cipherTextLen = encrypt(messageContent, strlen(messageContent), key, iv, cipherText);
+		cipherTextLen = encrypt(messageContent, 512, key, iv, cipherText);
 		
 		outgoing[1] = (cipherTextLen >> 24) & 0xFF;
 		outgoing[2] = (cipherTextLen >> 16) & 0xFF;
 		outgoing[3] = (cipherTextLen >> 8) & 0xFF;
 		outgoing[4] = cipherTextLen & 0xFF;
-		memcpy(outgoing + 5, cipherText, 512);
+		memcpy(outgoing + 5, cipherText, 1024);
+		printf("Encrypted message length: %d\n", cipherTextLen);
 
 		//TODO: Check server to make sure we're not cutting off last 4 bytes
-		send(sockfd, outgoing, 517, 0);
+		send(sockfd, outgoing, 1029, 0);
 		return;
 	}
 

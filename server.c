@@ -170,18 +170,16 @@ void * server(void * cs) {
 	int i;
 
 	while(1) {
-		unsigned char encryptedMessage[BUFFER_SIZE];
+		char encryptedMessage[BUFFER_SIZE];
 		char line[BUFFER_SIZE];
 		recv(clientSocket, encryptedMessage, BUFFER_SIZE, 0);
 		
 		if (encryptedMessage[0] != OP_INIT && encryptedMessage[0] != OP_SYM) {
 			int encryptedMessageLen = encryptedMessage[1] << 24 | encryptedMessage[2] << 16 | encryptedMessage[3] << 8 | encryptedMessage[4];
+			printf("About to decrypt with size %d.\n", encryptedMessageLen);
 
-			printf("About to decrypt the message.\n");
 			struct User currentUser = getUserBySockfd(clientSocket);
 			decrypt(encryptedMessage + 5, encryptedMessageLen, currentUser.dKey, currentUser.dIv, line + 1);
-
-			printf("Decrypted the message: %s.\n", line);
 		}
 		
 		int success = 0;
@@ -201,28 +199,17 @@ void * server(void * cs) {
 				break;
 			case OP_SYM:
 				cipherLen = encryptedMessage[1] << 24 | encryptedMessage[2] << 16 | encryptedMessage[3] << 8 | encryptedMessage[4];
-				printf("Got the symetric key from the client with size %d.\n", cipherLen);
 				
 				unsigned char decryptedMessage[32 + 16];
 				unsigned char dKey[32];
 				unsigned char dIv[16];
-
-				printf("About to rsa decrypt.\n");
 
   				rsa_decrypt(encryptedMessage + 5 + 16, cipherLen, privkey, decryptedMessage);
 
 				memcpy(dKey, decryptedMessage, 32);
 				memcpy(dIv, encryptedMessage + 5, 16);
 
-				printf("About to decrypt.\n");
-
 				int messageLen = encryptedMessage[514] << 24 | encryptedMessage[515] << 16 | encryptedMessage[516] << 8 | encryptedMessage[517];
-				printf("Message length is %d.\n", messageLen);
-				printf("Message is: ");
-				for (i = 0; i < messageLen; i++) {
-					printf("%x", encryptedMessage[i + 518]);
-				}
-				printf("\n");
 				
 				decrypt(encryptedMessage + 518, messageLen, dKey, dIv, username);
 
@@ -302,16 +289,25 @@ void removeUser(char name[256]) {
 
 int broadcast(char sender[256], char message[MESSAGE_SIZE]) {
 	int i;
-	char outgoing[513];
+	char outgoing[1029];
+	char messageToEncrypt[512];
+	strcpy(messageToEncrypt, sender);
+	strcpy(messageToEncrypt + 256, message);
+
 	outgoing[0] = OP_BROADCAST;
-	strcpy(outgoing + 1, sender);
-	strcpy(outgoing + 1 + 256, message);
 
 	for (i = 0; i < 100; i++) {
-		//printf("For user %s:\n\tValid bit is %d\n\tSockfd is %d\n\n", users[i].name, users[i].valid, users[i].sockfd);
 		if (strcmp(sender, users[i].name) != 0 && users[i].valid == 1) {
 			printf("Sending broadcast message to %s on sfd %d.\n", users[i].name, users[i].sockfd);
-			send(users[i].sockfd, outgoing, 513, 0);
+
+			int encryptedLen = encrypt(messageToEncrypt, 513, users[i].dKey, users[i].dIv, outgoing + 5);
+
+			printf("Encrypted message length is %d.\n", encryptedLen);
+			outgoing[1] = (encryptedLen >> 24) & 0xFF;
+			outgoing[2] = (encryptedLen >> 16) & 0xFF;
+			outgoing[3] = (encryptedLen >> 8) & 0xFF;
+			outgoing[4] = encryptedLen & 0xFF;
+			send(users[i].sockfd, outgoing, 1029, 0);
 		}
 	}
 }
@@ -320,9 +316,13 @@ int broadcast(char sender[256], char message[MESSAGE_SIZE]) {
 void whisper(char username[256], char * message, int fromSocket) {
 	printf("Sending a whisper from %d to %s with message %s.\n", fromSocket, username, message);
 	struct User user = getUser(username);
-	char outgoing[513];
+	char outgoing[1029];
+	char messageToEncrypt[512];
 
 	struct User sender = getUserBySockfd(fromSocket);
+
+	strcpy(messageToEncrypt, sender.name);
+	strcpy(messageToEncrypt + 256, message);
 	
 	if (user.valid != 1 || sender.valid != 1) {
 		printf("No such user.\n");
@@ -333,12 +333,16 @@ void whisper(char username[256], char * message, int fromSocket) {
 	printf("Sending a whisper from %s to %s.\n", sender.name, username);
 
 	outgoing[0] = OP_WHISPER;
-	strcpy(outgoing + 1, sender.name);
-	strcpy(outgoing + 257, message);
 
-	printf("Outgoing whisper is %x %s %s.\n", outgoing[0], outgoing + 1, outgoing + 257);
+	int encryptedLen = encrypt(messageToEncrypt, 513, user.dKey, user.dIv, outgoing + 5);
 
-	send(user.sockfd, outgoing, 513, 0);
+	printf("Encrypted message length is %d.\n", encryptedLen);
+	outgoing[1] = (encryptedLen >> 24) & 0xFF;
+	outgoing[2] = (encryptedLen >> 16) & 0xFF;
+	outgoing[3] = (encryptedLen >> 8) & 0xFF;
+	outgoing[4] = encryptedLen & 0xFF;
+
+	send(user.sockfd, outgoing, 1029, 0);
 }
 
 void kickUser(char username[256]) {
@@ -370,7 +374,7 @@ void clientList(int sockfd) {
 	int userNum = 0;
 	for (i = 0; i < 100; i++) {
 		if (users[i].valid && strcmp(user.name, users[i].name) != 0) {
-			strcpy(message + (userNum * 256) + 1, users[i].name);
+			strcpy(message + (userNum * 256) + 5, users[i].name);
 			userNum++;
 		}
 	}
